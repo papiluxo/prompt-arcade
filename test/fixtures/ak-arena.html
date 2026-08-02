@@ -1,0 +1,163 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Orb Rush</title>
+<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0b0e1a}</style>
+</head>
+<body>
+<script>
+/* Orb Rush — reference Arcade Kit game. Grab orbs, most orbs when the clock
+ * hits zero wins. Host-authoritative, shared lobby, AK for everything. */
+const W = 1100, H = 700
+const ROUND = 45
+
+const { ctx } = AK.canvas()
+AK.camera.fit(W, H)
+
+AK.menu({
+  title: 'ORB RUSH',
+  how: 'Grab the gold orbs. Most orbs when the clock hits zero wins.',
+  controls: [['WASD / Arrows', 'Move'], ['Space', 'Start round'], ['Esc', 'Menu']],
+  onRestart: () => MP.sendInput({ restart: true }),
+  pause: MP.playerCount <= 1,
+})
+
+// ---- host simulation ------------------------------------------------------
+const inputs = {}
+MP.on('input', (data, fromId) => { inputs[fromId] = { ...(inputs[fromId] || {}), ...data } })
+
+let state = null
+function freshState() {
+  const s = { phase: 'lobby', t: ROUND, orbs: [], entities: {} }
+  for (let i = 0; i < 10; i++) s.orbs.push(spawnOrb())
+  return s
+}
+function spawnOrb() {
+  return { x: 60 + AK.math.rand(W - 120), y: 60 + AK.math.rand(H - 120), r: 9 }
+}
+function spawn(p) {
+  return { x: 80 + AK.math.rand(W - 160), y: 80 + AK.math.rand(H - 160), vx: 0, vy: 0, score: 0, color: p.color, name: p.name }
+}
+
+MP.on('reset', () => { if (MP.isHost) state = freshState() })
+
+function update(dt) {
+  if (!MP.isHost) return
+  if (!state) state = freshState()
+
+  // Roster is live: spawn joiners, drop leavers — every tick, by id.
+  for (const p of MP.players) if (!state.entities[p.id]) state.entities[p.id] = spawn(p)
+  for (const id of Object.keys(state.entities))
+    if (!MP.players.some((p) => p.id === id)) delete state.entities[id]
+
+  // Anyone can start or restart.
+  for (const id of Object.keys(inputs)) {
+    if (inputs[id].start && state.phase === 'lobby') state.phase = 'playing'
+    if (inputs[id].restart) { state = freshState(); inputs[id].restart = false; return }
+  }
+
+  if (state.phase === 'playing') {
+    state.t -= dt
+    if (state.t <= 0) { state.t = 0; state.phase = 'over' }
+    for (const id of Object.keys(state.entities)) {
+      const e = state.entities[id]
+      const inp = inputs[id] || {}
+      const ax = (inp.right ? 1 : 0) - (inp.left ? 1 : 0)
+      const ay = (inp.down ? 1 : 0) - (inp.up ? 1 : 0)
+      e.vx += ax * 900 * dt; e.vy += ay * 900 * dt
+      e.vx *= 0.9; e.vy *= 0.9
+      e.x = AK.math.clamp(e.x + e.vx * dt * 60, 16, W - 16)
+      e.y = AK.math.clamp(e.y + e.vy * dt * 60, 16, H - 16)
+      for (const orb of state.orbs) {
+        if (AK.hit.circles({ x: e.x, y: e.y, r: 14 }, orb)) {
+          e.score++
+          orb.x = 60 + AK.math.rand(W - 120); orb.y = 60 + AK.math.rand(H - 120)
+          MP.emit('got', { x: e.x, y: e.y, color: e.color })
+        }
+      }
+    }
+  }
+  MP.setState(state)
+}
+
+// ---- every client: input + render from received state ----------------------
+let view = null
+MP.on('state', (s) => { view = s })
+MP.on('event', (type, d) => {
+  if (type === 'got') {
+    AK.particles.burst({ x: d.x, y: d.y, color: '#ffd43b', count: 14, speed: 150, life: 0.45 })
+    AK.sfx.pickup()
+    AK.camera.shake(3)
+  }
+})
+
+let sent = {}
+function shipInput() {
+  const a = AK.input.axis()
+  const next = {
+    left: a.x < 0, right: a.x > 0, up: a.y < 0, down: a.y > 0,
+    start: !!(AK.input.keys[' '] || AK.input.keys.Enter || AK.input.pointer.down),
+  }
+  if (JSON.stringify(next) !== JSON.stringify(sent)) { sent = next; MP.sendInput(next) }
+}
+
+function render() {
+  AK.draw.clear(ctx, '#0b0e1a')
+  AK.camera.begin(ctx)
+  AK.draw.rect(ctx, 0, 0, W, H, '#11162a')
+  AK.draw.ring(ctx, W / 2, H / 2, 120, 'rgba(255,255,255,.05)', 30)
+
+  if (view) {
+    for (const orb of view.orbs) {
+      AK.draw.glow(ctx, orb.x, orb.y, 26, '#ffd43b', 0.35)
+      AK.draw.circle(ctx, orb.x, orb.y, orb.r, '#ffd43b')
+    }
+    for (const id of Object.keys(view.entities)) {
+      const e = view.entities[id]
+      AK.stamp(ctx, 'ship', { x: e.x, y: e.y, r: 15, color: e.color, angle: Math.atan2(e.vy, e.vx) })
+      if (id === MP.me.id) AK.draw.ring(ctx, e.x, e.y, 22, '#ffffff', 2)
+      AK.draw.text(ctx, e.name, e.x, e.y - 28, { size: 12, color: e.color })
+    }
+    AK.particles.draw(ctx)
+  }
+  AK.camera.end(ctx)
+
+  // HUD in screen space.
+  if (!view) {
+    AK.draw.text(ctx, 'ORB RUSH', AK.view.w / 2, AK.view.h / 2 - 20, { size: 44, color: '#fff' })
+    AK.draw.text(ctx, 'connecting…', AK.view.w / 2, AK.view.h / 2 + 24, { size: 14, color: '#9aa3c7' })
+  } else if (view.phase === 'lobby') {
+    AK.draw.text(ctx, 'ORB RUSH', AK.view.w / 2, AK.view.h * 0.3, { size: 44, color: '#fff' })
+    AK.draw.text(ctx, 'Grab the gold orbs. Most orbs wins.', AK.view.w / 2, AK.view.h * 0.3 + 40, { size: 15, color: '#9aa3c7' })
+    MP.players.forEach((p, i) => {
+      AK.draw.text(ctx, (p.id === MP.me.id ? '▶ ' : '') + p.name, AK.view.w / 2, AK.view.h * 0.3 + 84 + i * 24, { size: 15, color: p.color })
+    })
+    AK.draw.text(ctx, 'press SPACE to start — anyone can', AK.view.w / 2, AK.view.h * 0.75, { size: 16, color: '#fff' })
+  } else {
+    const ranked = Object.keys(view.entities).map((id) => view.entities[id]).sort((a, b) => b.score - a.score)
+    ranked.forEach((e, i) => {
+      AK.draw.text(ctx, `${e.name}  ${e.score}`, 90, 26 + i * 22, { size: 14, color: e.color, align: 'left' })
+    })
+    AK.draw.text(ctx, Math.ceil(view.t) + 's', AK.view.w / 2, 30, { size: 24, color: view.t < 10 ? '#ffa8a8' : '#fff' })
+    if (view.phase === 'over') {
+      AK.draw.text(ctx, (ranked[0] ? ranked[0].name : '—') + ' WINS', AK.view.w / 2, AK.view.h / 2, { size: 40, color: ranked[0] ? ranked[0].color : '#fff' })
+      AK.draw.text(ctx, 'press SPACE to go again', AK.view.w / 2, AK.view.h / 2 + 44, { size: 15, color: '#9aa3c7' })
+    }
+  }
+}
+
+AK.loop({
+  update(dt) {
+    shipInput()
+    // Space also restarts from the "over" screen.
+    if (MP.isHost && view && view.phase === 'over' && (sent.start || false)) state = freshState()
+    update(dt)
+  },
+  render,
+})
+
+MP.ready()
+</script>
+</body>
+</html>

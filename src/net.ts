@@ -22,6 +22,8 @@ export type Variant = {
   title: string
   problems: string[]
   repaired: boolean
+  /** True when the build ran in headless Chrome (host + guest) and passed. */
+  verified?: boolean
   ms: number
   bytes: number
   html?: string

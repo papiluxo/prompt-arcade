@@ -43,7 +43,10 @@ if (!target) {
 
 const raw = await readFile(target, 'utf8')
 const html = target.endsWith('.json') ? JSON.parse(raw).html : raw
-const runtime = await readFile(join(ROOT, 'shared', 'mp-runtime.js'), 'utf8')
+const runtime = [
+  await readFile(join(ROOT, 'shared', 'mp-runtime.js'), 'utf8'),
+  await readFile(join(ROOT, 'shared', 'arcade-kit.js'), 'utf8'),
+].join('\n')
 
 const needsThree = /\bTHREE\s*\./.test(html)
 const libSource = needsThree
@@ -70,12 +73,12 @@ window.__g = blank()          // guest
 
 const host = document.createElement('iframe')
 host.setAttribute('sandbox','allow-scripts')
-host.srcdoc = window.__SRCDOC
+host.srcdoc = window.__SRCDOC_HOST
 document.body.appendChild(host)
 
 const guest = document.createElement('iframe')
 guest.setAttribute('sandbox','allow-scripts')
-guest.srcdoc = window.__SRCDOC
+guest.srcdoc = window.__SRCDOC_GUEST
 if (window.__PAIR) document.body.appendChild(guest)
 
 window.__probe = () => {
@@ -143,13 +146,25 @@ window.__drive = () => {
 }
 </script></body></html>`
 
+/* Identity is baked into each frame's document exactly like GameFrame does
+ * with __MP_INIT, so MP.isHost is correct from the game's first line
+ * (mirrors server/verify.mjs). */
+const P1 = { id: 'p1', name: 'Ana', color: '#8ce99a', index: 0, isHost: true }
+const P2 = { id: 'p2', name: 'Bo', color: '#74c0fc', index: 1, isHost: false }
+const roster = PAIR ? [P1, P2] : [P1]
+const initFor = (me, isHost) =>
+  `<script>window.__MP_INIT = ${JSON.stringify({ me, players: roster, isHost, seed: 1234 }).replace(/</g, '\\u003c')};</script>\n`
+
 // Serve the harness so the iframe gets a normal opaque-origin sandbox.
 const server = createServer((req, res) => {
   // The game contains its own </script> tags; they must not close the harness's.
-  const literal = JSON.stringify(injectRuntime(html, runtime)).replace(/<\/script/gi, '<\\/script')
+  const literalFor = (init) =>
+    JSON.stringify(injectRuntime(html, runtime, init)).replace(/<\/script/gi, '<\\/script')
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
   res.end(
-    HARNESS.replace(/window\.__SRCDOC/g, literal).replace(/window\.__PAIR/g, String(PAIR)),
+    HARNESS.replace(/window\.__SRCDOC_HOST/g, literalFor(initFor(P1, true)))
+      .replace(/window\.__SRCDOC_GUEST/g, literalFor(initFor(P2, false)))
+      .replace(/window\.__PAIR/g, String(PAIR)),
   )
 })
 await new Promise((r) => server.listen(0, r))
@@ -204,10 +219,10 @@ addEventListener('message', function (ev) {
   parent.postMessage({ t: 'paint', paint: out }, '*')
 })`
 
-function injectRuntime(doc, rt) {
+function injectRuntime(doc, rt, initTag = '') {
   // Mirror what GameFrame does, libraries included, or a 3D game explodes here
   // for reasons that have nothing to do with the game.
-  const tag = `${libSource}<script>\n${rt}\n${PROBE}\n</script>\n`
+  const tag = `${libSource}${initTag}<script>\n${rt}\n${PROBE}\n</script>\n`
   if (/<head[^>]*>/i.test(doc)) return doc.replace(/<head[^>]*>/i, (m) => m + '\n' + tag)
   if (/<html[^>]*>/i.test(doc)) return doc.replace(/<html[^>]*>/i, (m) => m + '\n' + tag)
   return tag + doc

@@ -7,6 +7,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import mpRuntime from '../shared/mp-runtime.js?raw'
+import arcadeKit from '../shared/arcade-kit.js?raw'
 import { arcade, diag, type Player } from './net'
 
 /* A floor, not a straitjacket: injected before the game's own styles so the
@@ -108,6 +109,9 @@ export function GameFrame({ html, version, seed, me, players, isHost, solo = fal
       // Identity first, so the runtime is fully formed before game code runs.
       `<script>window.__MP_INIT = ${initJson.replace(/</g, '\\u003c')};</script>`,
       `<script>\n${mpRuntime}\n</script>`,
+      // Arcade Kit rides after MP (it reads MP.random / MP.on) and before the
+      // game, so AK.* is fully formed when the game's first line runs.
+      `<script>\n${arcadeKit}\n</script>`,
     ].join('\n')
     return inject(html, head)
   }, [html, libs, initJson])

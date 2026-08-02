@@ -6,6 +6,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { readFile, writeFile, rename, mkdir } from 'node:fs/promises'
+import { join as joinPath } from 'node:path'
 import { generateGame, MODELS, DEFAULT_MODEL } from './generate.mjs'
 import { saveGame, getGame, recordPlay } from './library.mjs'
 
@@ -95,6 +97,109 @@ setInterval(() => {
   }
 }, 60_000).unref()
 
+// ------------------------------------------------- restart survival
+// Rooms are working state, not records — but a server restart mid-session
+// must not eat the room. Everything durable about every room is snapshotted
+// to one file, and restored (players parked as disconnected) on boot. The
+// client's reconnect loop then walks everyone back in with their player id.
+
+const DATA_DIR = process.env.DATA_DIR || joinPath(process.cwd(), 'data')
+const ROOMS_FILE = joinPath(DATA_DIR, 'rooms.json')
+let persistTimer = null
+
+function durableRoom(room) {
+  return {
+    id: room.id,
+    createdAt: room.createdAt,
+    seed: room.seed,
+    // A build in flight cannot survive a restart; land on the previous screen.
+    phase: room.phase === 'generating' ? (room.game ? 'playing' : 'lobby') : room.phase,
+    hostId: null, // re-elected as people reconnect
+    models: room.models,
+    scope: room.scope,
+    mode: room.mode,
+    brief: room.brief,
+    briefSource: room.briefSource,
+    ideas: [...room.ideas],
+    ideaVotes: [...room.ideaVotes],
+    ideaWinner: room.ideaWinner,
+    variants: room.variants,
+    votes: [...room.votes],
+    game: room.game,
+    chat: room.chat.slice(-60),
+    players: [...room.players.values()].map((p) => ({
+      id: p.id,
+      name: p.name,
+      color: p.color,
+      index: p.index,
+    })),
+  }
+}
+
+/** Debounced write-behind: at most one disk write per 2s, atomic via rename. */
+export function persistRooms() {
+  if (persistTimer) return
+  persistTimer = setTimeout(async () => {
+    persistTimer = null
+    try {
+      await mkdir(DATA_DIR, { recursive: true })
+      const payload = JSON.stringify([...rooms.values()].map(durableRoom))
+      await writeFile(ROOMS_FILE + '.tmp', payload)
+      await rename(ROOMS_FILE + '.tmp', ROOMS_FILE)
+    } catch (err) {
+      console.error('room snapshot failed:', err.message)
+    }
+  }, 2000)
+  persistTimer.unref?.()
+}
+
+export async function restoreRooms() {
+  let saved
+  try {
+    saved = JSON.parse(await readFile(ROOMS_FILE, 'utf8'))
+  } catch {
+    return 0 // first boot, or nothing worth restoring
+  }
+  let count = 0
+  for (const s of saved) {
+    if (!s?.id || rooms.has(s.id)) continue
+    // Rooms that would have been TTL-collected anyway stay dead.
+    if (Date.now() - (s.createdAt || 0) > 24 * 60 * 60 * 1000) continue
+    const room = {
+      id: s.id,
+      createdAt: s.createdAt || Date.now(),
+      emptySince: Date.now(),
+      seed: s.seed || (Math.random() * 1e9) | 0,
+      players: new Map(
+        (s.players || []).map((p) => [
+          p.id,
+          { ...p, connected: false, isHost: false, voice: false, ws: null },
+        ]),
+      ),
+      hostId: null,
+      phase: s.phase || 'lobby',
+      ideas: new Map(s.ideas || []),
+      ideaVotes: new Map(s.ideaVotes || []),
+      ideaWinner: s.ideaWinner || null,
+      models: s.models?.length ? s.models : [DEFAULT_MODEL],
+      scope: s.scope || 'quick',
+      mode: s.mode || 'multi',
+      brief: s.brief || '',
+      briefSource: s.briefSource || 'ideas',
+      gen: null,
+      variants: s.variants || [],
+      votes: new Map(s.votes || []),
+      game: s.game || null,
+      chat: s.chat || [],
+      runtimeErrors: [],
+      remixing: false,
+    }
+    rooms.set(room.id, room)
+    count++
+  }
+  return count
+}
+
 // ------------------------------------------------------------------ messaging
 
 function send(ws, type, payload = {}) {
@@ -179,6 +284,7 @@ function snapshot(room) {
 
 function pushState(room) {
   broadcast(room, 'room', { room: snapshot(room) })
+  persistRooms() // anything worth telling the room is worth surviving a restart
 }
 
 function systemChat(room, text) {
@@ -786,6 +892,7 @@ async function runOne(room, opts) {
     mode: result.mode,
     problems: result.problems,
     repaired: result.repaired,
+    verified: result.verified,
     ms: result.ms,
   }
 }

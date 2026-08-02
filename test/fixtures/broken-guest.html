@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Broken Guest</title>
+<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0b0e1a}</style>
+</head>
+<body>
+<script>
+/* Deliberately broken fixture: the classic failure set the verifier exists to
+ * catch. Input is gated on isHost (guests are spectators), render references
+ * an undefined variable once the round starts, and the guest never draws. */
+const { ctx } = AK.canvas()
+
+if (MP.isHost) {
+  // Only the host can ever play — the exact bug from the first playtest.
+  window.addEventListener('keydown', (e) => MP.sendInput({ key: e.key }))
+}
+
+let state = { phase: 'playing', x: 100, y: 100 }
+MP.on('input', (d) => { state.x += 5 })
+
+let view = null
+if (MP.isHost) {
+  MP.on('state', (s) => { view = s })
+  setInterval(() => MP.setState(state), 50)
+}
+
+AK.loop({
+  render() {
+    if (!MP.isHost) return // guest draws nothing at all
+    AK.draw.clear(ctx, '#0b0e1a')
+    AK.draw.circle(ctx, state.x, state.y, 20, '#8ce99a')
+    // ReferenceError every frame:
+    AK.draw.text(ctx, scoreLabel, 200, 40, { size: 20 })
+  },
+})
+
+MP.ready()
+</script>
+</body>
+</html>

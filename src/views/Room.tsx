@@ -347,6 +347,43 @@ function IdeaVote({ room, you }: { room: RoomState; you: Player }) {
   )
 }
 
+/* Each phase of a build job, in the order the track renders them. A model
+ * writes, the arcade boots the result in a real browser and plays it, failed
+ * checks go back for repair, and only a passing game leaves this screen. */
+const BUILD_STEPS = ['writing', 'testing', 'repairing', 'done'] as const
+
+const PHASE_LABEL: Record<string, string> = {
+  queued: 'QUEUED',
+  designing: 'DESIGNING',
+  writing: 'WRITING',
+  testing: 'TESTING — RUNNING IT IN A REAL BROWSER',
+  repairing: 'REPAIRING',
+  done: 'PASSED',
+}
+
+function BuildTrack({ phase, status }: { phase: string; status: string }) {
+  const done = status === 'done'
+  const idx = done ? BUILD_STEPS.length : BUILD_STEPS.indexOf(phase as never)
+  return (
+    <div className="build-track" aria-hidden>
+      {BUILD_STEPS.map((step, i) => (
+        <i
+          key={step}
+          className={
+            done
+              ? 'is-ok'
+              : i < idx
+                ? 'is-done'
+                : i === idx
+                  ? 'is-live'
+                  : ''
+          }
+        />
+      ))}
+    </div>
+  )
+}
+
 function BuildStream({ room, models }: { room: RoomState; models: ModelInfo[] }) {
   const gen = room.gen
   const [elapsed, setElapsed] = useState(0)
@@ -363,10 +400,10 @@ function BuildStream({ room, models }: { room: RoomState; models: ModelInfo[] })
     <div className="screen build">
       <div className="scanlines" aria-hidden />
       <div className="build-head">
-        <p className="mono eyebrow phosphor-dim">
-          {gen?.remix ? 'rewriting' : gen?.stage === 'merging' ? 'merging everyone’s ideas' : 'writing your game'}
+        <p className="mono eyebrow">
+          {gen?.remix ? 'rewriting' : gen?.stage === 'merging' ? 'merging everyone’s ideas' : 'building your game'}
         </p>
-        <p className="mono build-timer phosphor">{elapsed}s</p>
+        <p className="mono build-timer">{elapsed}s</p>
       </div>
 
       {gen?.remix && <p className="build-request">“{gen.remix}”</p>}
@@ -376,16 +413,27 @@ function BuildStream({ room, models }: { room: RoomState; models: ModelInfo[] })
         {ids.map((id) => {
           const slot = gen!.byModel[id]
           const model = models.find((m) => m.id === id)
+          const phase = slot.status === 'done' ? 'done' : slot.phase
           return (
             <div key={id} className="build-pane">
               <div className="build-pane-head">
-                <span className="mono">{model?.label || id}</span>
+                <span className="mono build-model">{model?.label || id}</span>
                 <span className="mono dim">
                   {slot.status === 'done'
-                    ? `done · ${Math.round((slot.ms || 0) / 1000)}s`
-                    : `${slot.phase} · ${slot.chars.toLocaleString()} chars`}
+                    ? `${Math.round((slot.ms || 0) / 1000)}s`
+                    : `${slot.chars.toLocaleString()} chars`}
                 </span>
               </div>
+              <BuildTrack phase={phase} status={slot.status} />
+              <p className="build-phase">
+                <span
+                  className={
+                    phase === 'testing' ? 'is-testing' : phase === 'done' ? 'is-verified' : ''
+                  }
+                >
+                  {PHASE_LABEL[phase] || phase.toUpperCase()}
+                </span>
+              </p>
               <pre className="phosphor-stream" aria-hidden>
                 {slot.preview || '…'}
               </pre>
@@ -431,6 +479,11 @@ function VariantPicker({
                   {v.modelId} · {Math.round(v.ms / 1000)}s · {Math.round(v.bytes / 1024)}kb
                 </span>
               </header>
+              {v.verified && (
+                <span className="verified" title="This build ran in a real browser — host and guest — before you saw it">
+                  verified in browser
+                </span>
+              )}
               {v.problems.length > 0 && (
                 <p className="warn mono">
                   {v.problems.length} warning{v.problems.length === 1 ? '' : 's'}

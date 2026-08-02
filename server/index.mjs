@@ -6,7 +6,7 @@ import { join, extname, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 
-import { handleConnection, createRoom, getRoom, roomStats } from './rooms.mjs'
+import { handleConnection, createRoom, getRoom, roomStats, restoreRooms } from './rooms.mjs'
 import { MODELS, backendInfo } from './generate.mjs'
 import { listGames, getGame, lineage, bundleStandalone, recordPlay } from './library.mjs'
 
@@ -27,6 +27,9 @@ const MIME = {
 }
 
 const standaloneShim = await readFile(join(ROOT, 'shared', 'mp-standalone.js'), 'utf8')
+const arcadeKit = await readFile(join(ROOT, 'shared', 'arcade-kit.js'), 'utf8')
+// A downloaded game needs the same floor it stood on in the arcade.
+const standaloneRuntime = `${standaloneShim}\n${arcadeKit}`
 
 /* Libraries a generated game may use. Too big to bundle into the client, so
  * they are fetched on demand and inlined into the game's sandbox. */
@@ -131,7 +134,7 @@ const server = createServer(async (req, res) => {
         // depends on travels with it.
         const libs = []
         for (const name of libsFor(rec.html)) libs.push(await readLib(name))
-        const html = bundleStandalone(rec, standaloneShim, libs)
+        const html = bundleStandalone(rec, standaloneRuntime, libs)
         const filename = `${rec.title.replace(/[^\w -]+/g, '').trim().replace(/\s+/g, '-') || 'game'}.html`
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
@@ -180,6 +183,18 @@ wss.on('connection', (ws) => {
     ws.isAlive = true
   })
 })
+
+/* One bad handler must never take the arcade down mid-session. Log it, keep
+ * serving; rooms snapshot to disk, so even a hard crash is survivable. */
+process.on('uncaughtException', (err) => {
+  console.error('uncaught exception:', err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('unhandled rejection:', reason)
+})
+
+const restored = await restoreRooms()
+if (restored) console.log(`restored ${restored} room${restored === 1 ? '' : 's'} from disk`)
 
 server.listen(PORT, () => {
   const gen = backendInfo()

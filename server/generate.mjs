@@ -4,8 +4,14 @@
  *   cli — spawns the local `claude` binary (uses the signed-in subscription)
  *   api — Anthropic Messages API with ANTHROPIC_API_KEY
  *
- * A generation is never trusted: every result is validated, and a failing
- * result gets one repair round with the problems fed back in.
+ * A generation is never trusted, in two stages:
+ *   1. static validation — does the document parse, is the netcode shaped right
+ *   2. runtime verification (verify.mjs) — the game is BOOTED in headless
+ *      Chrome as host + guest, driven with input, and checked for errors,
+ *      blank screens and a playable second seat
+ * A failing candidate gets repair rounds with the concrete problems fed back.
+ * A game that still fails verification after that is refused — the room never
+ * receives a game that has not actually run.
  */
 
 import { spawn } from 'node:child_process'
@@ -18,6 +24,7 @@ import {
   buildRepairPrompt,
   buildDesignPrompt,
 } from './prompts.mjs'
+import { verifyGame } from './verify.mjs'
 
 export const MODELS = [
   {
@@ -55,6 +62,9 @@ const BACKEND = (process.env.GEN_BACKEND || 'cli').toLowerCase()
 // Generous by design: a big game from a flagship model can run long, and the
 // room has a Cancel button for when it is clearly not coming back.
 const TIMEOUT_MS = Number(process.env.GEN_TIMEOUT_SEC || 900) * 1000
+// How many times a failing candidate goes back to the model with its problem
+// list before the generation is refused outright.
+const MAX_REPAIR_ROUNDS = Number(process.env.GEN_REPAIR_ROUNDS || 3)
 
 export function modelById(id) {
   return MODELS.find((m) => m.id === id) || MODELS.find((m) => m.id === DEFAULT_MODEL)
@@ -160,30 +170,36 @@ export function validateGame(html, { mode = 'multi' } = {}) {
     }
   }
 
-  // Every game gets a menu with the controls in it.
+  // Every game gets a menu with the controls in it. AK.menu is the way; a
+  // hand-rolled Escape menu from an older game is still accepted.
   const hasMenu =
-    /(menu|pause|settings|options|controls)/i.test(html) &&
-    /(Escape|'Esc'|"Esc"|key\s*===\s*['"]Escape)/i.test(html)
+    /AK\.menu\s*\(/.test(html) ||
+    (/(menu|pause|settings|options|controls)/i.test(html) &&
+      /(Escape|'Esc'|"Esc"|key\s*===\s*['"]Escape)/i.test(html))
   if (!hasMenu) {
     problems.push(
-      'There is no in-game menu. Every game needs one that opens with Escape and a visible button, listing the full control layout, how to play, restart and a sound toggle.',
+      'There is no in-game menu. Call AK.menu({title, how, controls, onRestart, pause}) once at boot with the full control list.',
     )
   }
   for (const [re, msg] of FORBIDDEN) if (re.test(html)) problems.push(`The game ${msg}.`)
 
   // The single most common way a generated game looks broken: it locks the
   // canvas to a hard-coded size and never re-measures, so it renders into the
-  // top-left corner of the frame instead of filling it.
+  // top-left corner of the frame instead of filling it. AK.canvas() manages
+  // sizing forever, so its presence settles the question.
+  const usesAkCanvas = /AK\.canvas\s*\(/.test(html)
+  const uses3d = /\bTHREE\s*\./.test(html)
   const fixedCanvas =
     /canvas\.(width|height)\s*=\s*\d{2,}/.test(html) ||
     /<canvas[^>]+\b(width|height)\s*=\s*["']?\d{2,}/i.test(html)
   const handlesResize =
+    /AK\.onResize\s*\(/.test(html) ||
     /addEventListener\(\s*['"]resize/.test(html) ||
     /onresize\s*=/.test(html) ||
     /MP\.on\(\s*['"]resize/.test(html)
-  if (fixedCanvas && !handlesResize) {
+  if (!usesAkCanvas && !uses3d && fixedCanvas && !handlesResize) {
     problems.push(
-      'The canvas is locked to a hard-coded pixel size and the game never handles a resize, so it renders into a corner instead of filling the screen. Size the canvas from the window and re-measure on resize.',
+      'The canvas is locked to a hard-coded pixel size and the game never handles a resize, so it renders into a corner instead of filling the screen. Use AK.canvas() + AK.loop() instead of a hand-rolled canvas.',
     )
   }
 
@@ -441,49 +457,84 @@ export async function generateGame({
     ? buildRemixPrompt({ brief, request, players, html: baseHtml, mode })
     : buildGeneratePrompt({ brief, players, scope, design, mode })
 
-  let raw = await callModel({ modelId, prompt, onDelta: report('writing'), signal })
+  const raw = await callModel({ modelId, prompt, onDelta: report('writing'), signal })
   let html = extractHtml(raw)
-  let problems = validateGame(html, { mode })
-  let repaired = false
+  let repairs = 0
+  let verified = false
 
-  if (problems.length) {
-    onProgress?.({ phase: 'repairing', chars: html.length, preview: problems.join('\n') })
+  /* Judge one candidate. Static problems first (cheap, and a document that
+   * fails them is not worth booting); only a statically clean candidate pays
+   * for the browser run. */
+  const judge = async (candidate) => {
+    const staticProblems = validateGame(candidate, { mode })
+    if (staticProblems.length) return { problems: staticProblems, ran: false }
+    onProgress?.({
+      phase: 'testing',
+      chars: candidate.length,
+      preview: 'Booting the game in a real browser: host + second player, live input, error watch…',
+    })
+    const rt = await verifyGame({ html: candidate, mode })
+    if (signal?.aborted) throw new Error('cancelled')
+    return { problems: rt.failures, ran: !rt.skipped }
+  }
+
+  let { problems, ran } = await judge(html)
+  let best = { html, problems, ran }
+
+  while (problems.length && repairs < MAX_REPAIR_ROUNDS) {
+    if (signal?.aborted) throw new Error('cancelled')
+    repairs++
+    onProgress?.({
+      phase: 'repairing',
+      chars: html.length,
+      preview: `Repair round ${repairs}/${MAX_REPAIR_ROUNDS}:\n${problems.join('\n')}`,
+    })
     const repairPrompt = buildRepairPrompt({
       brief,
       html: html || raw.slice(0, 60_000),
       problems,
       mode,
     })
+    let fixed
     try {
-      const fixedRaw = await callModel({
-        modelId,
-        prompt: repairPrompt,
-        onDelta: report('repairing'),
-        signal,
-      })
-      const fixed = extractHtml(fixedRaw)
-      const afterProblems = validateGame(fixed, { mode })
-      // Only take the repair if it is genuinely better.
-      if (afterProblems.length < problems.length) {
-        html = fixed
-        problems = afterProblems
-        repaired = true
-      }
+      fixed = extractHtml(
+        await callModel({ modelId, prompt: repairPrompt, onDelta: report('repairing'), signal }),
+      )
     } catch (err) {
+      if (signal?.aborted) throw err
       onProgress?.({ phase: 'repairing', chars: 0, preview: `repair failed: ${err.message}` })
+      break
     }
+    if (!fixed || fixed.length < 800) continue // a dud reply burns the round, not the candidate
+
+    const verdict = await judge(fixed)
+    // Adopt the repair unless it is strictly worse — staying on a version the
+    // model has already failed to fix once is the losing move.
+    if (verdict.problems.length <= problems.length) {
+      html = fixed
+      problems = verdict.problems
+      ran = verdict.ran
+    }
+    if (problems.length < best.problems.length) best = { html, problems, ran }
   }
 
+  if (best.problems.length < problems.length) ({ html, problems, ran } = best)
+  verified = ran && problems.length === 0
+
   if (problems.length) {
-    const fatal = !html || html.length < 800 || !/<script/i.test(html)
-    if (fatal) throw new Error(`the model did not produce a runnable game: ${problems[0]}`)
+    // The bar: a game that cannot demonstrably run is not handed to the room.
+    // Refusing here reads as "a model failed" upstream, which is the truth.
+    throw new Error(
+      `still broken after ${repairs} repair round${repairs === 1 ? '' : 's'}: ${problems[0]}`,
+    )
   }
 
   return {
     modelId,
     html,
-    problems,
-    repaired,
+    problems: [],
+    repaired: repairs > 0,
+    verified,
     mode,
     ms: Date.now() - started,
     title: guessTitle(html),

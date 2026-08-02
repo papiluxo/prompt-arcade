@@ -42,12 +42,12 @@ function TypedScreen() {
     <div className="screen hero-screen">
       <div className="scanlines" aria-hidden />
       <div className="hero-screen-inner">
-        <p className="mono eyebrow phosphor-dim">the room types</p>
-        <p className="hero-prompt phosphor">
+        <p className="mono eyebrow">the room types</p>
+        <p className="hero-prompt">
           {text}
           <span className="caret" aria-hidden />
         </p>
-        <p className="mono eyebrow phosphor-dim">the model builds it. you play it.</p>
+        <p className="mono eyebrow">built, tested in a real browser, then you play it</p>
       </div>
     </div>
   )
@@ -88,11 +88,6 @@ export function Home() {
   return (
     <div className="home">
       <header className="marquee">
-        <div className="bulbs" aria-hidden>
-          {Array.from({ length: 28 }, (_, i) => (
-            <span key={i} style={{ animationDelay: `${i * 60}ms` }} />
-          ))}
-        </div>
         <h1 className="wordmark">Prompt Arcade</h1>
         <p className="tagline">
           Get your friends in a room. Describe a game together. Play the thing you described.

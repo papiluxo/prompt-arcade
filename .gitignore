@@ -3,6 +3,7 @@ dist/
 .env
 data/games/*.json
 !data/games/.gitkeep
+data/rooms.json
 *.log
 .DS_Store
 logs/

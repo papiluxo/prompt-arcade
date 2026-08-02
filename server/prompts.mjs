@@ -1,7 +1,7 @@
 /* Prompt assembly for game generation, remixing and repair.
  *
- * The MP API described here is implemented by shared/mp-runtime.js. If you
- * change one, change the other.
+ * The MP API described here is implemented by shared/mp-runtime.js, and the
+ * AK API by shared/arcade-kit.js. If you change one, change the other.
  */
 
 const MP_API = `
@@ -28,6 +28,73 @@ const MP_API = `
     MP.random()          // seeded PRNG, deterministic per round
     MP.ready()           // call ONCE when your game is initialized and drawing
     MP.log(...)          // debug output to the arcade console
+`.trim()
+
+const AK_API = `
+## The Arcade Kit — AK (already loaded, like MP — never redefine it)
+
+AK is the engineering floor under every arcade game: the canvas, the loop,
+input, the camera, particles, sound and the menu are SOLVED. Use them. Games
+that hand-roll these are the games that ship broken.
+
+**Canvas + loop — mandatory for every 2D game:**
+
+    const { canvas, ctx } = AK.canvas()   // fullscreen, DPR-correct, auto-resizes forever
+    // Draw in CSS pixels: the current size is AK.view.w x AK.view.h.
+    AK.loop({
+      update(dt) { /* fixed 60Hz. Host simulation goes here. dt = 1/60 */ },
+      render()   { /* once per display frame. ALL drawing goes here */ },
+    })
+    AK.loop.paused = true|false            // pausing (menu does this for you in solo)
+
+For 3D (THREE), skip AK.canvas and use AK.onResize((w, h) => { renderer.setSize(w, h);
+camera.aspect = w/h; camera.updateProjectionMatrix() }) — it fires immediately and
+on every size change.
+
+**Input — never write your own key handlers:**
+
+    AK.input.keys['ArrowUp']    // live key state, by e.key and e.code
+    AK.input.axis()             // WASD+arrows as normalized {x, y}
+    AK.input.pressed('Space')   // true only on the frame it went down
+    AK.input.pointer            // {x, y, down, justDown} in CSS pixels
+
+**Camera — pick one mode, in render():**
+
+    AK.camera.follow(me.x, me.y)             // world bigger than the screen
+    AK.camera.clamp(worldW, worldH)          //   keep it inside the world
+    AK.camera.fit(worldW, worldH)            // OR: whole arena on screen, centred
+    AK.camera.shake(10)                      // impacts
+    AK.camera.begin(ctx)                     // then draw the WORLD in world coords
+      ...world drawing, AK.particles.draw(ctx)...
+    AK.camera.end(ctx)                       // then draw the HUD in screen coords
+    AK.camera.toWorld(AK.input.pointer.x, AK.input.pointer.y)   // aiming
+
+**Menu — call once at boot; this satisfies the menu requirement:**
+
+    AK.menu({
+      title: 'YOUR GAME NAME',
+      how: 'One or two sentences: the goal and how you win.',
+      controls: [['WASD / Arrows', 'Move'], ['Space', 'Fire'], ['Esc', 'Menu']],
+      onRestart: () => MP.sendInput({ restart: true }),  // host: on restart input, reset the round
+      pause: MP.playerCount <= 1,   // pause while open in solo; never pause a live MP round
+    })
+
+It installs the Escape binding, a corner MENU button, the controls table, a
+sound toggle, and a controls strip that shows at round start then fades.
+
+**Juice — free, use liberally:**
+
+    AK.stamp(ctx, 'ship', {x, y, r: 14, color: p.color, angle})   // real silhouettes:
+      // ship tank star heart skull crown bolt gem ghost coin flag crosshair
+    AK.particles.burst({x, y, color: '#ffd43b', count: 20, speed: 160, life: 0.5})
+    AK.draw.text(ctx, 'ROUND 2', AK.view.w/2, 80, {size: 42, color: '#fff'})
+    AK.draw.circle / rect / ring / line / poly / glow / clear(ctx, '#0b0e1a')
+    AK.sfx.blip() shoot() jump() pickup() hit() boom() win() lose() tick()
+    AK.math.lerp clamp dist angle wrap rand(lo,hi) pick(arr)
+    AK.hit.circles(a, b) rects(a, b) circleRect(c, rect)   // {x,y,r} / {x,y,w,h}
+
+AK.sfx is WebAudio synthesis — there are no audio files and you need none.
+AK.math.rand uses the seeded MP.random, so it is deterministic per round.
 `.trim()
 
 const ARCHITECTURE = `
@@ -116,44 +183,22 @@ const CAMERA_RULES = `
 ## Centre the view on the player looking at it
 
 Each player is looking at their own screen and must see their own character,
-centred and in frame. The most common failure is drawing world coordinates
-straight to the canvas, so play happens in a corner or off-screen entirely.
+centred and in frame. Use AK.camera — never hand-roll transforms:
 
-Pick one of these two and implement it properly:
-
-**A camera that follows you** — for any world bigger than one screen:
-
-    const me = view.entities[MP.me.id]
-    const camX = me ? me.x - canvasW / 2 : worldW / 2 - canvasW / 2
-    const camY = me ? me.y - canvasH / 2 : worldH / 2 - canvasH / 2
-    ctx.save()
-    ctx.translate(-camX, -camY)
-    //   ... draw the world in world coordinates ...
-    ctx.restore()
-    //   ... draw the HUD afterwards, in screen coordinates ...
-
-Clamp the camera to the world edges so you never scroll past the level, and
-lerp it toward the target (\`cam += (target - cam) * 0.1\`) so it glides.
-
-**Fit the whole arena** — for shared-screen games where everyone plays in one
-bounded space:
-
-    const scale = Math.min(canvasW / worldW, canvasH / worldH) * 0.92
-    ctx.setTransform(scale, 0, 0, scale, (canvasW - worldW*scale)/2, (canvasH - worldH*scale)/2)
-
-That centres the arena and leaves a margin, at any window size.
+- World bigger than one screen → \`AK.camera.follow(me.x, me.y)\` each render,
+  then \`AK.camera.clamp(worldW, worldH)\` so it never scrolls past the level.
+- One bounded arena everyone shares → \`AK.camera.fit(worldW, worldH)\` once.
+- Wrap ALL world drawing in \`AK.camera.begin(ctx)\` … \`AK.camera.end(ctx)\`,
+  and draw the HUD after end(), in screen coordinates.
 
 Either way:
-- The local player must ALWAYS be visible. If they can go off screen, the
-  camera is wrong.
+- The local player (view.entities[MP.me.id]) must ALWAYS be visible. If they
+  can go off screen, the camera is wrong.
 - Mark the local player clearly — a ring, an arrow, "YOU" — so a player can
   find themselves instantly among identical-looking entities.
 - In 3D, the camera belongs to the local player: position it behind or on
   \`view.entities[MP.me.id]\` and look where they are looking. Never leave every
   client sharing one fixed camera.
-- Never lay the world out around numbers captured at load. Recompute from the
-  current canvas size every frame, so it stays centred after a resize or
-  fullscreen.
 `.trim()
 
 const EVERYONE_PLAYS = `
@@ -210,26 +255,17 @@ shared and nothing is synchronised — no other players appear, no netcode.
 const MENU_RULES = `
 ## Every game ships a menu. No exceptions.
 
-An in-game menu, present in every single game you build:
+Call \`AK.menu({...})\` once at boot with the real title, a real how-to line,
+and the COMPLETE control list — every key and mouse/touch action the game
+reads. That satisfies the requirement: Escape binding, corner MENU button,
+controls table, sound toggle, restart button, and the fading controls strip
+all come with it.
 
-- Opens with Escape AND with a visible button in a corner (a small ⚙ or MENU
-  button). Both work, on every client, at any time.
-- Contains, at minimum:
-    * CONTROLS — the full button layout, every key and mouse/touch action
-      spelled out, in a readable list. Not a one-line hint: an actual table.
-    * HOW TO PLAY — one or two sentences on the goal and how you win.
-    * RESTART — restarts the round.
-    * SOUND — a toggle that genuinely mutes and unmutes.
-- Pause the action while it is open in single player. In multiplayer the world
-  keeps running (other people are still playing), so just overlay it.
-- Closes with Escape, a Close button, and by clicking the backdrop.
-- DO NOT open it automatically in multiplayer. Everyone is already playing and
-  a panel covering the screen reads as "the game is broken" — the round is live
-  behind it. Start play immediately and leave the menu closed.
-  Instead show a small, non-blocking controls strip along one edge for the
-  first ~6 seconds, then fade it out. It must never swallow clicks or keys.
-  (In single player only, you may open the menu on first load.)
-- Style it like the rest of the game. It is part of the game, not a debug panel.
+- Wire \`onRestart\` so it works: send a restart input/event and have the host
+  reset the round when it arrives.
+- \`pause: MP.playerCount <= 1\` — pause solo play while the menu is open, but
+  never pause a live multiplayer round (other people are still playing).
+- Do NOT build your own menu panel on top of it.
 `.trim()
 
 const OUTPUT_RULES = `
@@ -246,32 +282,34 @@ const OUTPUT_RULES = `
 3. Do not use localStorage, sessionStorage, alert(), confirm() or prompt().
 4. Do not create iframes and do not redefine MP.
 5. Call MP.ready() exactly once, after your game is initialized.
-6. FILL THE FRAME. This is the most common way these games come out broken, so
-   get it right: the game runs inside a panel that changes size — the window
-   resizes, a sidebar opens, a player hits fullscreen. Never hard-code a canvas
-   size. Measure the window every time and re-measure on resize:
-
-       const canvas = document.getElementById('c')
-       const ctx = canvas.getContext('2d')
-       function resize() {
-         const dpr = Math.min(window.devicePixelRatio || 1, 2)
-         canvas.width = Math.floor(innerWidth * dpr)
-         canvas.height = Math.floor(innerHeight * dpr)
-         canvas.style.width = innerWidth + 'px'
-         canvas.style.height = innerHeight + 'px'
-         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-       }
-       addEventListener('resize', resize)
-       resize()
-
-   Lay the playfield out relative to the current size — never around constants
-   captured once at load. If your design needs a fixed aspect ratio, letterbox
-   it and centre it; do not pin it to a corner. html/body get margin 0,
-   width/height 100%, overflow hidden, dark background. Support keyboard and
-   pointer/touch.
-7. Print the controls on screen (a small legend, and on the title screen).
+6. FILL THE FRAME: every 2D game uses AK.canvas() + AK.loop() — never create
+   or size a canvas by hand, never write your own requestAnimationFrame loop,
+   never hard-code dimensions. Lay the playfield out from AK.view.w/h (or the
+   world size + AK.camera), never from constants captured once at load. In 3D,
+   size the renderer with AK.onResize. html/body get margin 0, overflow
+   hidden, dark background. Support keyboard and pointer/touch.
+7. List every control in AK.menu; show anything else critical on the lobby
+   screen.
 8. It must run from a cold start with zero console errors. No syntax errors, no
    references to undeclared variables, no top-level await.
+
+## Your game will be tested before anyone plays it
+
+The instant you finish, this document is booted in a real browser: one frame
+as the host, a second frame as a guest, wired together like the real room.
+Synthetic players press keys. The run fails — and comes back to you as a
+repair job — if ANY of these happen:
+
+- a runtime error is thrown on either seat, at any point
+- MP.ready() is never called
+- the canvas is still blank after 5 seconds (draw the lobby immediately)
+- the host never broadcasts state, or the guest's keys never reach the host
+- the guest's screen stays empty while the host's is drawing
+- a third player joining mid-round breaks anything
+
+Write for that test: initialize synchronously, draw the lobby on frame one,
+guard everything that might not exist yet (view, entities[MP.me.id], players
+who just left), and never let one bad entity kill the whole frame.
 `.trim()
 
 const QUALITY_BAR = `
@@ -282,8 +320,12 @@ const QUALITY_BAR = `
   so the group can immediately go again. Handle MP.on('reset') too.
 - Give each player their MP.players[i].color and show their name near their
   entity or on a scoreboard, so everyone can find themselves.
-- Juice it: screen shake, particles, easing, a short WebAudio blip on key
-  events. This is the difference between a demo and something friends replay.
+- Juice is one line each — use it everywhere it earns its place:
+  AK.camera.shake on every impact, AK.particles.burst on hits/pickups/deaths,
+  AK.sfx on every meaningful event, AK.stamp for entities so things have real
+  silhouettes instead of circles.
+- Movement must feel good: acceleration and friction, not teleporting;
+  AK.math.lerp for anything that snaps.
 - Tune for 2-6 players on one screen. Prefer shared-screen designs over
   split-screen.
 - No dead ends: never require a resource you cannot generate at runtime.
@@ -361,7 +403,11 @@ ${rosterBlock(players)}
 
 The game ships as ONE self-contained HTML file with no external resources, no
 network, and no assets — everything drawn procedurally or with three.js (r149,
-available as the global \`THREE\`). It runs host-authoritative multiplayer: one
+available as the global \`THREE\`). An engine layer (the Arcade Kit) is already
+loaded: fixed-step game loop, auto-sizing canvas, unified input, follow/fit
+camera with shake, particle system, synthesized sound effects, vector sprite
+stamps, and the in-game menu. Design on top of it — the implementation will
+not spend lines on plumbing. It runs host-authoritative multiplayer: one
 client simulates and broadcasts JSON state ~20x/sec, the others send input and
 render what they receive.
 
@@ -410,6 +456,8 @@ ${brief}
 ${solo ? 'This is a SINGLE PLAYER game. Each person gets their own copy.' : rosterBlock(players)}
 ${design ? `\n## The agreed design — implement this\n\n${design}\n` : ''}
 ${MP_API}
+
+${AK_API}
 
 ${THREE_BLOCK}
 
@@ -463,6 +511,8 @@ ${html}
 
 ${MP_API}
 
+${AK_API}
+
 ${THREE_BLOCK}
 
 ${solo ? `${SOLO_RULES}\n\n${SOLO_LOBBY_RULES}` : `${LOBBY_RULES}\n\n${EVERYONE_PLAYS}\n\n${ARCHITECTURE}`}
@@ -500,6 +550,8 @@ ${html}
 \`\`\`
 
 ${MP_API}
+
+${AK_API}
 
 ${THREE_BLOCK}
 

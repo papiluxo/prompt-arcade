@@ -48,6 +48,13 @@
     })
   }
 
+  /* Identity is injected as a literal ahead of this script, so MP is fully
+   * formed before a single line of game code runs. This matters more than it
+   * looks: games routinely branch on MP.isHost at the top level, and any
+   * default we picked while waiting for a message was wrong for somebody —
+   * true stranded guests, false stopped the host from ever simulating. */
+  var boot = window.__MP_INIT || null
+
   // ---- seeded RNG (mulberry32) ------------------------------------------
   var seed = (boot && boot.seed | 0) || 1
   function nextRandom() {
@@ -58,12 +65,6 @@
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
 
-  /* Identity is injected as a literal ahead of this script, so MP is fully
-   * formed before a single line of game code runs. This matters more than it
-   * looks: games routinely branch on MP.isHost at the top level, and any
-   * default we picked while waiting for a message was wrong for somebody —
-   * true stranded guests, false stopped the host from ever simulating. */
-  var boot = window.__MP_INIT || null
   var initialised = !!boot
   var preInit = []
 

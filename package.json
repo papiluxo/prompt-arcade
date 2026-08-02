@@ -14,7 +14,8 @@
     "gen": "node test/gen-once.mjs",
     "playtest": "node test/playtest.mjs",
     "typecheck": "tsc --noEmit",
-    "twobrowser": "node test/twobrowser.mjs"
+    "twobrowser": "node test/twobrowser.mjs",
+    "verify-check": "node test/verify-check.mjs"
   },
   "dependencies": {
     "react": "^19.1.0",
